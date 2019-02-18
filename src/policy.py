@@ -1,4 +1,7 @@
 import numpy as np
+import pandas as pd
+from sklearn.linear_model import LinearRegression, LogisticRegression
+from data_proc import *
 
 
 class Policy(object):
@@ -7,6 +10,12 @@ class Policy(object):
     """
 
     def __init__(self):
+        raise NotImplementedError
+
+    def reset(self):
+        """
+        Resets the policy to its initial states
+        """
         raise NotImplementedError
 
     def choose_arm(self, context, eval=False):
@@ -36,6 +45,9 @@ class FixedDosePolicy(Policy):
     def __init__(self):
         pass
 
+    def reset(self):
+        pass
+
     def choose_arm(self, context, eval=False):
         return 1  # medium
 
@@ -43,13 +55,50 @@ class FixedDosePolicy(Policy):
         pass
 
 
+class OraclePolicy(Policy):
+    """
+    OraclePolicy pre-trains linear estimators using the entire training set
+    No online policy based on linear models can beat the performance of this policy
+    """
+
+    def __init__(self, data_file):
+        """
+        data_file: path to raw Warfarin dataset file
+        """
+        # Prepare training data
+        data = pd.read_csv(data_file)
+        data = preprocess(data)
+        data['bias'] = 1.0  # manually add a bias term
+        X = data.drop(['daily-dosage', 'dosage-level'], axis=1).values
+        y = [(data['dosage-level'] == l).astype(np.float32).values for l in ('low', 'medium', 'high')]
+
+        # Train three Logistic Classifiers for the three arms (large C -> no regularization)
+        self.models = [LogisticRegression(C=100000, fit_intercept=False, solver='liblinear') for _ in range(3)]
+        for i in range(3):
+            self.models[i].fit(X, y[i])
+
+    def reset(self):
+        # Reset has no effect since the internal models are trained using all data
+        pass
+
+    def choose_arm(self, context, eval=False):
+        scores = [m.predict_proba(context.reshape((1, -1)))[0,1] for m in self.models]
+        return np.argmax(scores)
+
+    def update_policy(self, context, arm, reward):
+        pass
+
+    def get_estimators(self):
+        return self.models
+
+
 class EpsilonGreedyPolicy(Policy):
     """
     At each step, this policy either chooses a random action with probability 'eps',
-    or chooses the optimal action based on current reward estimates
+    or chooses the optimal action based on current reward estimates.
+    When eps=0, the policy becomes a purely greedy policy
 
     The parameters of each arm are fitted using ordinary least-squares
-
     The implementation is not as efficient as it could be, just a quick prototype :)
     """
 
@@ -57,12 +106,14 @@ class EpsilonGreedyPolicy(Policy):
         self.context_dim = context_dim
         self.num_arms = num_arms
         self.eps = eps
-        self.step = 0
+        self.reset()
 
+    def reset(self):
+        self.step = 0
         # linear regression parameters
-        self.beta = np.zeros((num_arms, context_dim))
-        self.X_history = [None] * num_arms
-        self.y_history = [None] * num_arms
+        self.beta = np.zeros((self.num_arms, self.context_dim))
+        self.X_history = [None] * self.num_arms
+        self.y_history = [None] * self.num_arms
 
     def choose_arm(self, context, eval=False):
         if eval or np.random.binomial(1, self.eps) == 0:
