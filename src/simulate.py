@@ -8,37 +8,39 @@ from data_proc import *
 class WarfarinSimulator():
     """
     Simulates online learning of contextual bandit policies on the Warfarin dataset
+
+    Any label_discretizer function can be passed in upon initialization to specify how
+    continuous dosage labels are transformed to discrete arm labels
     """
 
-    def __init__(self, data_file, test_size=0, add_bias=True):
+    def __init__(self, data_file, label_discretizer, test_size=0, add_bias=True):
         """
-        Loads, preprocesses, and shuffles the Warfarin data
+        Loads and preprocesses the Warfarin data
+        label_discretizer is used to transform continuous dosage to discrete arm labels
+
         If add_bias is True, a constant bias term is added to the feature matrix
 
         Also reserves a hold-out validation set of size 'test_size'
         """
         # Load data
         data = pd.read_csv(data_file)
-        data = preprocess(data)
+        data = preprocess(data, label_discretizer)
         if add_bias:
             data['bias'] = 1.0
-        self.X_original = data.drop(['daily-dosage', 'dosage-level'], axis=1).values
-        self.y_original = data['dosage-level'].map({'low': 0, 'medium': 1, 'high': 2}).values
 
+        self.X_original = data.drop(['daily-dosage', 'dosage-level'], axis=1).values
+        self.y_original = data['dosage-level'].values
         self.test_size = test_size
         self.train_size = self.X_original.shape[0] - test_size
-        self.p = self.X_original.shape[1]  # number of features
-
-        # Randomly shuffle the data
-        self.reshuffle()
-
-        # Store most recent simulation results
+        self.num_features = self.X_original.shape[1]  # number of features
+        self.num_arms = data['dosage-level'].nunique()  # number of arms
         self.reward_history = None
+        self.val_step_history = None
         self.val_accuracy_history = None
 
-        # Logging
         print("Instantiated a Warfarin Bandit simulator!")
-        print("Number of features: {}".format(self.p))
+        print("Number of arms: {}".format(self.num_arms))
+        print("Number of features: {}".format(self.num_features))
         print("Size of training set for online learning: {}".format(self.train_size))
         print("Size of holdout validation set: {}".format(test_size))
 
@@ -70,7 +72,7 @@ class WarfarinSimulator():
         progbar = Progbar(target=self.train_size)  # progress bar
         for t in range(self.train_size):
             # Choose an arm to pull
-            context = self.Xtrain[t,:].reshape((self.p, 1))
+            context = self.Xtrain[t,:].reshape((self.num_features, 1))
             arm = policy.choose_arm(context)
 
             # Evaluate reward for the action
@@ -84,7 +86,7 @@ class WarfarinSimulator():
             if self.test_size != 0 and (t % eval_every == 0 or t == (self.train_size-1)):
                 correct_count = 0
                 for i in range(self.test_size):
-                    c = self.Xtest[i,:].reshape((self.p, 1))
+                    c = self.Xtest[i,:].reshape((self.num_features, 1))
                     correct_count += (policy.choose_arm(c, eval=True) == self.ytest[i])
                 val_accuracy_history.append(correct_count / self.test_size)
                 val_step_history.append(t)
@@ -94,9 +96,8 @@ class WarfarinSimulator():
                 progbar.update(t+1)
 
         self.reward_history = np.array(reward_history)
-        if self.test_size != 0:
-            self.val_step_history = np.array(val_step_history)
-            self.val_accuracy_history = np.array(val_accuracy_history)
+        self.val_step_history = np.array(val_step_history) if self.test_size != 0 else None
+        self.val_accuracy_history = np.array(val_accuracy_history) if self.test_size != 0 else None
 
 
     """

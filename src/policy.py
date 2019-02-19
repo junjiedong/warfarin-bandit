@@ -50,17 +50,17 @@ class Policy(object):
 class WarfarinFixedDosePolicy(Policy):
     """
     WarfarinFixedDosePolicy doesn't learn anything
-    It chooses arm 1 (i.e. medium dose) all the time
+    It chooses one fixed arm all the time
     """
 
-    def __init__(self):
-        pass
+    def __init__(self, arm):
+        self.arm = arm
 
     def reset(self):
         pass
 
     def choose_arm(self, context, eval=False):
-        return 1  # medium
+        return self.arm
 
     def update_policy(self, context, arm, reward):
         pass
@@ -72,20 +72,23 @@ class WarfarinOraclePolicy(Policy):
     No online policy based on linear models can beat the performance of this policy
     """
 
-    def __init__(self, data_file):
+    def __init__(self, data_file, label_discretizer):
         """
         data_file: path to raw Warfarin dataset file
+        label_discretizer: function that maps continuous daily dosage to 0 ~ K-1
         """
         # Prepare training data
         data = pd.read_csv(data_file)
-        data = preprocess(data)
+        data = preprocess(data, label_discretizer)
         data['bias'] = 1.0  # manually add a bias term
-        X = data.drop(['daily-dosage', 'dosage-level'], axis=1).values
-        y = [(data['dosage-level'] == l).astype(np.float32).values for l in ('low', 'medium', 'high')]
 
-        # Train three Logistic Classifiers for the three arms (large C -> no regularization)
-        self.models = [LogisticRegression(C=100000, fit_intercept=False, solver='liblinear') for _ in range(3)]
-        for i in range(3):
+        K = data['dosage-level'].nunique()  # number of dosage levels (i.e. arms/classes)
+        X = data.drop(['daily-dosage', 'dosage-level'], axis=1).values
+        y = [(data['dosage-level'] == l).astype(np.float32).values for l in range(K)]
+
+        # Train K Logistic Classifiers for the K arms (large C -> no regularization)
+        self.models = [LogisticRegression(C=100000, fit_intercept=False, solver='liblinear') for _ in range(K)]
+        for i in range(K):
             self.models[i].fit(X, y[i])
 
     def reset(self):
@@ -216,7 +219,7 @@ class UCB1Policy(Policy):
     def reset(self):
         self.step = 0
         self.num_selected = np.zeros(self.num_arms) # number of times each arm is selected
-        self.sum_of_rewards = np.zeros(self.num_arms)
+        self.sum_of_rewards = np.zeros(self.num_arms) # cumulative rewards for each arm
         self.reward_estimates = np.zeros(self.num_arms)
 
     def choose_arm(self, context, eval=False):

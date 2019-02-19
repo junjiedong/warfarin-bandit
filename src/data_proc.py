@@ -3,25 +3,41 @@ import pandas as pd
 pd.options.mode.chained_assignment = None
 
 
-def discretize_label(dosage):
+def discretize_label_3(dosage):
     """
-    Quantize the daily dosage to three discrete levels
+    Quantize the daily dosage to three discrete levels 0 ~ 2
     This function is consistent with both the project handout and the Lasso Bandit paper
     """
     if dosage <= 3:
-        return 'low'
+        return 0  # low
     elif dosage >= 7:
-        return 'high'
+        return 2  # high
     else:
-        return 'medium'
+        return 1  # medium
+
+def discretize_label_9(dosage):
+    """
+    Quantize the daily dosage to nine discrete levels 0 ~ 8
+    """
+    dosage_round = round(dosage)
+    if dosage_round <= 1:
+        return 0
+    elif dosage_round <= 8:
+        return dosage_round - 1
+    else:
+        return 8
+
+def discretize_label_dummy(dosage):
+    return dosage
 
 
-def preprocess(data):
+def preprocess(data, label_discretizer):
     """
     Extracts features and labels + imputes missing values for numerical features
 
     Args:
         data: DataFrame that contains raw Warfarin data
+        label_discretizer: Function that maps continuous daily dosage to discrete levels (0 ~ K-1)
     Returns:
         features: features and labels extracted from the raw data
 
@@ -47,7 +63,7 @@ def preprocess(data):
     # Transform and quantize dosage labels
     features = data[['Therapeutic Dose of Warfarin']].copy()
     features['daily-dosage'] = features['Therapeutic Dose of Warfarin'] / 7
-    features['dosage-level'] = features['daily-dosage'].map(discretize_label)
+    features['dosage-level'] = features['daily-dosage'].map(label_discretizer)
     features.drop(['Therapeutic Dose of Warfarin'], axis=1, inplace=True)
 
     # Age

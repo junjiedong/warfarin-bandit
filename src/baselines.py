@@ -1,13 +1,13 @@
 import numpy as np
 import pandas as pd
-from data_proc import discretize_label
 
-def genetic_predict(data):
+def genetic_predict(data ,label_discretizer):
     """
     Make predictions using the baseline Pharmacogenetic dosing algorithm (Appx S1e)
 
     Args:
         data: DataFrame of features
+        label_discretizer: Function that maps continuous daily dosage to discrete levels (0 ~ K-1)
     Returns:
         predicted_dosage_level: prediction output (Pandas Series)
     """
@@ -30,16 +30,17 @@ def genetic_predict(data):
                         2.3312 * data['CYP2C9-33'] -
                         0.2188 * data['CYP2C9-Unknown'])**2 / 7
 
-    predicted_dosage_level = predicted_dosage.map(discretize_label)
+    predicted_dosage_level = predicted_dosage.map(label_discretizer)
     return predicted_dosage_level
 
 
-def clinical_predict(data):
+def clinical_predict(data, label_discretizer):
     """
     Make predictions using the baseline Clinical dosing algorithm (Appx S1f)
 
     Args:
         data: DataFrame of features
+        label_discretizer: Function that maps continuous daily dosage to discrete levels (0 ~ K-1)
     Returns:
         predicted_dosage_level: prediction output (Pandas Series)
     """
@@ -52,5 +53,5 @@ def clinical_predict(data):
                         0.0443 * data['Race-Unknown'] +
                         1.2799 * data['Enzyme'] -
                         0.5695 * data['Amiodarone'])**2 / 7
-    predicted_dosage_level = predicted_dosage.map(discretize_label)
+    predicted_dosage_level = predicted_dosage.map(label_discretizer)
     return predicted_dosage_level
