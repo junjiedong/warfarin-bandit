@@ -22,11 +22,12 @@ class WarfarinSimulator():
         data = preprocess(data)
         if add_bias:
             data['bias'] = 1.0
-        self.X = data.drop(['daily-dosage', 'dosage-level'], axis=1).values
-        self.y = data['dosage-level'].map({'low': 0, 'medium': 1, 'high': 2}).values
+        self.X_original = data.drop(['daily-dosage', 'dosage-level'], axis=1).values
+        self.y_original = data['dosage-level'].map({'low': 0, 'medium': 1, 'high': 2}).values
+
         self.test_size = test_size
-        self.train_size = self.X.shape[0] - test_size
-        self.p = self.X.shape[1]  # number of features
+        self.train_size = self.X_original.shape[0] - test_size
+        self.p = self.X_original.shape[1]  # number of features
 
         # Randomly shuffle the data
         self.reshuffle()
@@ -42,31 +43,30 @@ class WarfarinSimulator():
         print("Size of holdout validation set: {}".format(test_size))
 
 
-    def reshuffle(self):
+    def reshuffle(self, random_seed=None):
         """
         Re-shuffles the data to generate a new permutation & train/test split
         """
-        self.X, self.y = shuffle(self.X, self.y)
+        self.X, self.y = shuffle(self.X_original, self.y_original, random_state=random_seed)
         self.Xtrain, self.ytrain = self.X[self.test_size:,:], self.y[self.test_size:]
         if self.test_size != 0:
             self.Xtest, self.ytest = self.X[:self.test_size,:], self.y[:self.test_size]
 
 
-    def simulate(self, policy, eval_every=50):
+    def simulate(self, policy, eval_every=50, random_seed=None):
         """
         Iterates through the entire training set for online policy learning & evaluation
         Performs cross validation every 'eval_every' iterations if test_size > 0
 
-        Every time this method is called, the dataset is re-shuffled first
-        This makes simulating a policy multiple times more convenient
+        Every time this method is called, the dataset is first re-shuffled using the given
+        random_seed. This makes simulating a policy multiple times more convenient
         """
-        self.reshuffle()
+        self.reshuffle(random_seed)
 
         reward_history = []  # rewards received at every step
         val_step_history = []  # steps at which cross validation is performed
         val_accuracy_history = []  # accuracies on validation set
 
-        print("Start simulation...")
         progbar = Progbar(target=self.train_size)  # progress bar
         for t in range(self.train_size):
             # Choose an arm to pull

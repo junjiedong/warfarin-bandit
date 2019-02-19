@@ -1,3 +1,14 @@
+"""
+Policies for general contextual multi-armed bandit:
+1. LinUCBPolicy
+2. EpsilonGreedyPolicy
+3. UCB1Policy (simply ignores the context)
+
+Policies for Warfarin bandit:
+1. WarfarinFixedDosePolicy
+2. WarfarinOraclePolicy
+"""
+
 import numpy as np
 import pandas as pd
 from sklearn.linear_model import LinearRegression, LogisticRegression
@@ -36,9 +47,9 @@ class Policy(object):
         raise NotImplementedError
 
 
-class FixedDosePolicy(Policy):
+class WarfarinFixedDosePolicy(Policy):
     """
-    FixedDosePolicy doesn't learn anything
+    WarfarinFixedDosePolicy doesn't learn anything
     It chooses arm 1 (i.e. medium dose) all the time
     """
 
@@ -55,9 +66,9 @@ class FixedDosePolicy(Policy):
         pass
 
 
-class OraclePolicy(Policy):
+class WarfarinOraclePolicy(Policy):
     """
-    OraclePolicy pre-trains linear estimators using the entire training set
+    WarfarinOraclePolicy pre-trains linear estimators using the entire training set
     No online policy based on linear models can beat the performance of this policy
     """
 
@@ -92,34 +103,93 @@ class OraclePolicy(Policy):
         return self.models
 
 
-class EpsilonGreedyPolicy(Policy):
+class LinUCBPolicy(Policy):
     """
-    At each step, this policy either chooses a random action with probability 'eps',
-    or chooses the optimal action based on current reward estimates.
-    When eps=0, the policy becomes a purely greedy policy
+    LinUCBPolicy implements the LinUCB algorithm in paper "A Contextual Bandit Approach
+    to Personalized News Article Recommendation".
+    It fits a ridge regression estimator for each arm, and uses the idea of upper confidence
+    bound to balance exploration and exploitation.
 
-    The parameters of each arm are fitted using ordinary least-squares
-    The implementation is not as efficient as it could be, just a quick prototype :)
+    There is a single tuning parameter 'alpha' that controls the exploration tradeoff
     """
 
-    def __init__(self, context_dim, num_arms, eps=0.2):
+    def __init__(self, context_dim, num_arms, alpha=1.0):
         self.context_dim = context_dim
         self.num_arms = num_arms
-        self.eps = eps
+        self.alpha = alpha
         self.reset()
 
     def reset(self):
         self.step = 0
-        # linear regression parameters
-        self.beta = np.zeros((self.num_arms, self.context_dim))
-        self.X_history = [None] * self.num_arms
-        self.y_history = [None] * self.num_arms
+        self.num_selected = np.zeros(self.num_arms) # number of times each arm is selected
+        self.num_suboptimal_actions = 0 # number of times we select suboptimal actions for exploration
+
+        self.theta = np.zeros((self.num_arms, self.context_dim)) # linear estimators
+        self.A = [np.eye(self.context_dim) for _ in range(self.num_arms)]
+        self.A_inv = [np.linalg.inv(a) for a in self.A]
+        self.b = [np.zeros((self.context_dim, 1)) for _ in range(self.num_arms)]
 
     def choose_arm(self, context, eval=False):
-        if eval or np.random.binomial(1, self.eps) == 0:
+        reward_estimates = np.dot(self.theta, context).reshape((self.num_arms,))
+        greedy_arm = np.argmax(reward_estimates)
+        if eval:
+            return greedy_arm  # choose greedily
+        else:
+            confidence_bonus = np.zeros(self.num_arms)
+            for i in range(self.num_arms):
+                confidence_bonus[i] = self.alpha * np.sqrt(context.T.dot(self.A_inv[i]).dot(context)[0,0])
+
+            select_arm = np.argmax(reward_estimates + confidence_bonus)
+            if greedy_arm != select_arm:
+                self.num_suboptimal_actions += 1
+            return select_arm
+
+    def update_policy(self, context, arm, reward):
+        self.step += 1
+        self.num_selected[arm] += 1
+
+        # update linear estimators
+        self.A[arm] += np.dot(context, context.T)
+        self.A_inv[arm] = np.linalg.inv(self.A[arm])
+        self.b[arm] += reward * context
+        self.theta[arm,:] = np.dot(self.A_inv[arm], self.b[arm]).reshape((self.context_dim,))
+
+    def get_exploration_history(self):
+        return self.num_selected
+
+    def get_num_suboptimal_actions(self):
+        # Number of times we select suboptimal actions for exploration
+        return self.num_suboptimal_actions
+
+
+class EpsilonGreedyPolicy(Policy):
+    """
+    At step t, this policy either chooses a random action with probability
+    eps_schedule(t), or chooses the optimal action based on current reward estimates.
+    When eps_schedule(t) is always zero, the policy becomes a purely greedy policy
+
+    The parameters of each arm are fitted using ordinary least-squares
+    """
+
+    def __init__(self, context_dim, num_arms, eps_schedule=lambda t: 0.2):
+        self.context_dim = context_dim
+        self.num_arms = num_arms
+        self.eps_schedule = eps_schedule
+        self.reset()
+
+    def reset(self):
+        self.step = 0
+        self.theta = np.zeros((self.num_arms, self.context_dim)) # linear estimators
+        self.A = [np.eye(self.context_dim) for _ in range(self.num_arms)]
+        self.A_inv = [np.linalg.inv(a) for a in self.A]
+        self.b = [np.zeros((self.context_dim, 1)) for _ in range(self.num_arms)]
+
+    def choose_arm(self, context, eval=False):
+        eps = max(self.eps_schedule(self.step + 1), 0)
+        if eval or np.random.binomial(1, eps) == 0:
             # Choose optimal action based on current reward estimates
-            scores = np.dot(self.beta, context).reshape((self.num_arms,))
-            return np.argmax(scores)
+            reward_estimates = np.dot(self.theta, context).reshape((self.num_arms,))
+            return np.argmax(reward_estimates)
         else:
             # Uniformly sample an action
             return np.random.choice(self.num_arms)
@@ -127,15 +197,52 @@ class EpsilonGreedyPolicy(Policy):
     def update_policy(self, context, arm, reward):
         self.step += 1
 
-        # Update history
-        context = context.T.copy()
-        if self.X_history[arm] is None:
-            self.X_history[arm] = context
-            self.y_history[arm] = np.array([[reward]])
-        else:
-            self.X_history[arm] = np.vstack((self.X_history[arm], context))
-            self.y_history[arm] = np.vstack((self.y_history[arm], np.array([[reward]])))
+        # update linear estimators
+        self.A[arm] += np.dot(context, context.T)
+        self.A_inv[arm] = np.linalg.inv(self.A[arm])
+        self.b[arm] += reward * context
+        self.theta[arm,:] = np.dot(self.A_inv[arm], self.b[arm]).reshape((self.context_dim,))
 
-        # Update parameters
-        X, y = self.X_history[arm], self.y_history[arm]
-        self.beta[arm,:] = np.dot(np.linalg.pinv(X), y).reshape((self.context_dim,))
+
+class UCB1Policy(Policy):
+    """
+    Upper Confidence Bound Algorithm (UCB1) for non-contextual multi-armed bandit
+    For contextual bandit, UCB1 will simply ignore the context
+    """
+
+    def __init__(self, num_arms):
+        self.num_arms = num_arms
+
+    def reset(self):
+        self.step = 0
+        self.num_selected = np.zeros(self.num_arms) # number of times each arm is selected
+        self.sum_of_rewards = np.zeros(self.num_arms)
+        self.reward_estimates = np.zeros(self.num_arms)
+
+    def choose_arm(self, context, eval=False):
+        if eval:
+            return self.get_optimal_arm()
+        else:
+            scores = np.zeros(self.num_arms)
+            bonus_constant = 2 * np.log(self.step + 1)
+            for i in range(self.num_arms):
+                if self.num_selected[i] == 0:
+                    scores[i] = 1000000
+                else:
+                    scores[i] = self.reward_estimates[i] + np.sqrt(bonus_constant / self.num_selected[i])
+            return np.argmax(scores)
+
+    def update_policy(self, context, arm, reward):
+        self.step += 1
+        self.num_selected[arm] += 1
+        self.sum_of_rewards[arm] += reward
+        self.reward_estimates[arm] = self.sum_of_rewards[arm] / self.num_selected[arm]
+
+    def get_optimal_arm(self):
+        return np.argmax(self.reward_estimates)
+
+    def get_reward_estimates(self):
+        return self.reward_estimates
+
+    def get_exploration_history(self):
+        return self.num_selected
