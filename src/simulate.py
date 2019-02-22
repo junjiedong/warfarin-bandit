@@ -34,9 +34,10 @@ class WarfarinSimulator():
         self.train_size = self.X_original.shape[0] - test_size
         self.num_features = self.X_original.shape[1]  # number of features
         self.num_arms = data['dosage-level'].nunique()  # number of arms
-        self.reward_history = None
-        self.val_step_history = None
-        self.val_accuracy_history = None
+        self.reward_history = None  # rewards received at every step
+        self.val_step_history = None  # steps at which cross validation is performed
+        self.val_accuracy_history = None  # accuracies on validation set
+        self.confusion_matrix = None
 
         print("Instantiated a Warfarin Bandit simulator!")
         print("Number of arms: {}".format(self.num_arms))
@@ -65,11 +66,11 @@ class WarfarinSimulator():
         """
         self.reshuffle(random_seed)
 
-        reward_history = []  # rewards received at every step
-        val_step_history = []  # steps at which cross validation is performed
-        val_accuracy_history = []  # accuracies on validation set
+        reward_history = []
+        val_step_history = []
+        val_accuracy_history = []
+        confusion_matrix = np.zeros((self.num_arms, self.num_arms))
 
-        progbar = Progbar(target=self.train_size)  # progress bar
         for t in range(self.train_size):
             # Choose an arm to pull
             context = self.Xtrain[t,:].reshape((self.num_features, 1))
@@ -78,6 +79,9 @@ class WarfarinSimulator():
             # Evaluate reward for the action
             reward = int(arm == self.ytrain[t]) - 1
             reward_history.append(reward)
+
+            # Update confusion matrix
+            confusion_matrix[self.ytrain[t], arm] += 1
 
             # Update policy based on reward feedback
             policy.update_policy(context, arm, reward)
@@ -91,11 +95,8 @@ class WarfarinSimulator():
                 val_accuracy_history.append(correct_count / self.test_size)
                 val_step_history.append(t)
 
-            # Periodically update the progress bar
-            if t % 50 == 0 or t == (self.train_size-1):
-                progbar.update(t+1)
-
         self.reward_history = np.array(reward_history)
+        self.confusion_matrix = confusion_matrix
         self.val_step_history = np.array(val_step_history) if self.test_size != 0 else None
         self.val_accuracy_history = np.array(val_accuracy_history) if self.test_size != 0 else None
 
@@ -112,3 +113,6 @@ class WarfarinSimulator():
     def get_total_regret(self):
         # total regret with respect to optimal decisions
         return -self.reward_history.sum()
+
+    def get_confusion_matrix(self):
+        return self.confusion_matrix

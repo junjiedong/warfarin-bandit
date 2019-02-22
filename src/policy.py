@@ -6,7 +6,8 @@ Policies for general contextual multi-armed bandit:
 
 Policies for Warfarin bandit:
 1. WarfarinFixedDosePolicy
-2. WarfarinOraclePolicy
+2. WarfarinLinearOraclePolicy
+3. WarfarinLogisticOraclePolicy
 """
 
 import numpy as np
@@ -66,10 +67,48 @@ class WarfarinFixedDosePolicy(Policy):
         pass
 
 
-class WarfarinOraclePolicy(Policy):
+class WarfarinLinearOraclePolicy(Policy):
     """
-    WarfarinOraclePolicy pre-trains linear estimators using the entire training set
-    No online policy based on linear models can beat the performance of this policy
+    WarfarinLinearOraclePolicy pre-trains a linear regression estimator for each arm using all data
+    No online policy based on linear regression can beat the performance of this policy
+    """
+
+    def __init__(self, data_file, label_discretizer):
+        """
+        data_file: path to raw Warfarin dataset file
+        label_discretizer: function that maps continuous daily dosage to 0 ~ K-1
+        """
+        # Prepare training data
+        data = pd.read_csv(data_file)
+        data = preprocess(data, label_discretizer)
+        data['bias'] = 1.0  # manually add a bias term
+
+        self.num_arms = data['dosage-level'].nunique()  # number of dosage levels (i.e. arms/classes)
+        X = data.drop(['daily-dosage', 'dosage-level'], axis=1).values
+        y = [(data['dosage-level'] == l).astype(np.float32).values for l in range(self.num_arms)]
+        self.num_features = X.shape[1]
+
+        # Train K linear regression estimators with no regularization
+        self.theta = np.zeros((self.num_arms, self.num_features)) # linear estimators
+        for i in range(self.num_arms):
+            self.theta[i,:] = np.dot(np.linalg.pinv(X), y[i]).reshape((self.num_features,))
+
+    def reset(self):
+        # Reset has no effect since the internal models are trained using all data
+        pass
+
+    def choose_arm(self, context, eval=False):
+        scores = np.dot(self.theta, context).reshape((self.num_arms,))
+        return np.argmax(scores)
+
+    def update_policy(self, context, arm, reward):
+        pass
+
+
+class WarfarinLogisticOraclePolicy(Policy):
+    """
+    WarfarinLogisticOraclePolicy pre-trains a Logistic classifier for each arm using all data
+    This policy only works when the bandit rewards are binary
     """
 
     def __init__(self, data_file, label_discretizer):
@@ -249,3 +288,67 @@ class UCB1Policy(Policy):
 
     def get_exploration_history(self):
         return self.num_selected
+
+
+class LinUCBSafePolicy(Policy):
+    """
+    Exactly the same as LinUCB, except we don't allow risky exploration:
+        - Explore high when greedy action is low, OR
+        - Explore low when greedy action is high
+    Q: Is this cheating?
+    """
+    def __init__(self, context_dim, num_arms, alpha=1.0):
+        self.context_dim = context_dim
+        self.num_arms = num_arms
+        self.alpha = alpha
+        self.reset()
+
+    def reset(self):
+        self.step = 0
+        self.num_selected = np.zeros(self.num_arms) # number of times each arm is selected
+        self.num_suboptimal_actions = 0 # number of times we select suboptimal actions for exploration
+
+        self.theta = np.zeros((self.num_arms, self.context_dim)) # linear estimators
+        self.A = [np.eye(self.context_dim) for _ in range(self.num_arms)]
+        self.A_inv = [np.linalg.inv(a) for a in self.A]
+        self.b = [np.zeros((self.context_dim, 1)) for _ in range(self.num_arms)]
+
+    def choose_arm(self, context, eval=False):
+        reward_estimates = np.dot(self.theta, context).reshape((self.num_arms,))
+        greedy_arm = np.argmax(reward_estimates)
+        if eval:
+            return greedy_arm  # choose greedily
+        else:
+            confidence_bonus = np.zeros(self.num_arms)
+            for i in range(self.num_arms):
+                confidence_bonus[i] = self.alpha * np.sqrt(context.T.dot(self.A_inv[i]).dot(context)[0,0])
+
+            scores = reward_estimates + confidence_bonus
+            select_arm = np.argmax(scores)
+
+            # Prevent risky exploration
+            if select_arm == 0 and greedy_arm == 2:
+                select_arm = 1 if scores[1] >= scores[2] else 2
+            if select_arm == 2 and greedy_arm == 0:
+                select_arm = 1 if scores[1] >= scores[0] else 0
+
+            if greedy_arm != select_arm:
+                self.num_suboptimal_actions += 1
+            return select_arm
+
+    def update_policy(self, context, arm, reward):
+        self.step += 1
+        self.num_selected[arm] += 1
+
+        # update linear estimators
+        self.A[arm] += np.dot(context, context.T)
+        self.A_inv[arm] = np.linalg.inv(self.A[arm])
+        self.b[arm] += reward * context
+        self.theta[arm,:] = np.dot(self.A_inv[arm], self.b[arm]).reshape((self.context_dim,))
+
+    def get_exploration_history(self):
+        return self.num_selected
+
+    def get_num_suboptimal_actions(self):
+        # Number of times we select suboptimal actions for exploration
+        return self.num_suboptimal_actions
