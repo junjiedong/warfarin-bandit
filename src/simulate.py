@@ -29,7 +29,8 @@ class WarfarinSimulator():
             data['bias'] = 1.0
 
         self.X_original = data.drop(['daily-dosage', 'dosage-level'], axis=1).values
-        self.y_original = data['dosage-level'].values
+        self.y_continuous_original = data['daily-dosage'].values  # real-valued label
+        self.y_discrete_original = data['dosage-level'].values  # discretized label
         self.test_size = test_size
         self.train_size = self.X_original.shape[0] - test_size
         self.num_features = self.X_original.shape[1]  # number of features
@@ -50,10 +51,17 @@ class WarfarinSimulator():
         """
         Re-shuffles the data to generate a new permutation & train/test split
         """
-        self.X, self.y = shuffle(self.X_original, self.y_original, random_state=random_seed)
-        self.Xtrain, self.ytrain = self.X[self.test_size:,:], self.y[self.test_size:]
+        self.X, self.y_continuous, self.y_discrete = shuffle(self.X_original,
+                                                             self.y_continuous_original,
+                                                             self.y_discrete_original,
+                                                             random_state=random_seed)
+        self.Xtrain = self.X[self.test_size:,:]
+        self.ytrain_continuous = self.y_continuous[self.test_size:]
+        self.ytrain_discrete = self.y_discrete[self.test_size:]
         if self.test_size != 0:
-            self.Xtest, self.ytest = self.X[:self.test_size,:], self.y[:self.test_size]
+            self.Xtest= self.X[:self.test_size,:]
+            self.ytest_continuous = self.y_continuous[:self.test_size]
+            self.ytest_discrete = self.y_discrete[:self.test_size]
 
 
     def simulate(self, policy, eval_every=50, random_seed=None):
@@ -77,11 +85,21 @@ class WarfarinSimulator():
             arm = policy.choose_arm(context)
 
             # Evaluate reward for the action
-            reward = int(arm == self.ytrain[t]) - 1
+            """
+            NOTE: For real-valued reward, calculate 'reward' using self.ytrain_continuous.
+                  If also need to calculate the average dosage level for each arm,
+                  do it in the __init__ method so that the code works for any
+                  dosage label discretizer functions (do not hardcode the values!)
+
+                  For binary reward, regret history can be easily inferred from
+                  'reward_history'. If we want to evaluate regret for real-valued
+                  reward, then record the regret in a 'regret_history' array
+            """
+            reward = int(arm == self.ytrain_discrete[t]) - 1  # binary reward
             reward_history.append(reward)
 
             # Update confusion matrix
-            confusion_matrix[self.ytrain[t], arm] += 1
+            confusion_matrix[self.ytrain_discrete[t], arm] += 1
 
             # Update policy based on reward feedback
             policy.update_policy(context, arm, reward)
@@ -91,7 +109,7 @@ class WarfarinSimulator():
                 correct_count = 0
                 for i in range(self.test_size):
                     c = self.Xtest[i,:].reshape((self.num_features, 1))
-                    correct_count += (policy.choose_arm(c, eval=True) == self.ytest[i])
+                    correct_count += (policy.choose_arm(c, eval=True) == self.ytest_discrete[i])
                 val_accuracy_history.append(correct_count / self.test_size)
                 val_step_history.append(t)
 
