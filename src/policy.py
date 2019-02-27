@@ -1,8 +1,9 @@
 """
 Policies for general contextual multi-armed bandit:
 1. LinUCBPolicy
-2. EpsilonGreedyPolicy
-3. UCB1Policy (simply ignores the context)
+2. LinearThompsonPolicy
+3. EpsilonGreedyPolicy
+4. UCB1Policy (simply ignores the context)
 
 Policies for Warfarin bandit:
 1. WarfarinFixedDosePolicy
@@ -196,12 +197,62 @@ class LinUCBPolicy(Policy):
         self.b[arm] += reward * context
         self.theta[arm,:] = np.dot(self.A_inv[arm], self.b[arm]).reshape((self.context_dim,))
 
-    def get_exploration_history(self):
+    def get_action_counts(self):
         return self.num_selected
 
     def get_num_suboptimal_actions(self):
         # Number of times we select suboptimal actions for exploration
         return self.num_suboptimal_actions
+
+
+class LinearThompsonPolicy(Policy):
+    """
+    Algorithm "Thompson Sampling for contextual bandits with linear payoffs" (ICML13)
+
+    A single hyperparameter v controls the exploration/exploitation tradeoff
+    larger v -> higher variance for prior distribution -> more exploration
+    """
+
+    def __init__(self, context_dim, num_arms, v=0.01):
+        self.context_dim = context_dim
+        self.num_arms = num_arms
+        self.v = v  # scaling factor of covariance matrix; controls exploration tradeoff
+        self.reset()
+
+    def reset(self):
+        self.step = 0
+        self.num_selected = np.zeros(self.num_arms) # number of times each arm is selected
+
+        self.theta = np.zeros((self.num_arms, self.context_dim)) # linear estimators
+        self.A = [np.eye(self.context_dim) for _ in range(self.num_arms)]
+        self.A_inv = [np.linalg.inv(a) for a in self.A]
+        self.b = [np.zeros((self.context_dim, 1)) for _ in range(self.num_arms)]
+
+    def choose_arm(self, context, eval=False):
+        if eval:
+            return np.argmax(np.dot(self.theta, context).squeeze())
+        else:
+            scores = np.zeros(self.num_arms)
+            for i in range(self.num_arms):
+                # Sample model parameter from prior distribution
+                theta_sample = np.random.multivariate_normal(mean=self.theta[i,:],
+                                                             cov=(self.v * self.A_inv[i]))
+                # Calculate expected payoff
+                scores[i] = np.sum(theta_sample * context.squeeze())
+            return np.argmax(scores)
+
+    def update_policy(self, context, arm, reward):
+        self.step += 1
+        self.num_selected[arm] += 1
+
+        # compute new posterior distribution
+        self.A[arm] += np.dot(context, context.T)
+        self.A_inv[arm] = np.linalg.inv(self.A[arm])
+        self.b[arm] += reward * context
+        self.theta[arm,:] = np.dot(self.A_inv[arm], self.b[arm]).reshape((self.context_dim,))
+
+    def get_action_counts(self):
+        return self.num_selected
 
 
 class EpsilonGreedyPolicy(Policy):
@@ -286,7 +337,7 @@ class UCB1Policy(Policy):
     def get_reward_estimates(self):
         return self.reward_estimates
 
-    def get_exploration_history(self):
+    def get_action_counts(self):
         return self.num_selected
 
 
@@ -346,7 +397,7 @@ class LinUCBSafePolicy(Policy):
         self.b[arm] += reward * context
         self.theta[arm,:] = np.dot(self.A_inv[arm], self.b[arm]).reshape((self.context_dim,))
 
-    def get_exploration_history(self):
+    def get_action_counts(self):
         return self.num_selected
 
     def get_num_suboptimal_actions(self):
