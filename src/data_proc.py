@@ -31,7 +31,7 @@ def discretize_label_dummy(dosage):
     return dosage
 
 
-def preprocess(data, label_discretizer):
+def preprocess(data, label_discretizer, standardize=False, add_bias=False):
     """
     Extracts features and labels + imputes missing values for numerical features
 
@@ -107,6 +107,19 @@ def preprocess(data, label_discretizer):
     for col in ('Current Smoker', 'Congestive Heart Failure and/or Cardiomyopathy'):
         features[col + '-1'] = (data[col] == 1).astype(int)
         features[col + '-0'] = (data[col] == 0).astype(int)
+
+    # If needed, scale the features to have zero mean and unit variance
+    if standardize:
+        for col in features.columns:
+            if col not in ('daily-dosage', 'dosage-level'):
+                mean = features[col].mean()
+                std = features[col].std()
+                if std != 0:  # just in case there are constant columns
+                    features[col] = (features[col] - mean) / std
+
+    # If needed, add a constant 'bias' column
+    if add_bias:
+        features['bias'] = 1.0
 
     return features
 

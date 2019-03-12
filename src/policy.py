@@ -1,9 +1,14 @@
 """
+Policies for general non-contextual multi-armed bandit:
+1. UCB1Policy
+2. BernoulliThompsonPolicy
+
 Policies for general contextual multi-armed bandit:
 1. LinUCBPolicy
 2. LinearThompsonPolicy
 3. EpsilonGreedyPolicy
-4. UCB1Policy (simply ignores the context)
+4. LogisticUCBPolicy
+5. LogisticThompsonPolicy
 
 Policies for Warfarin bandit:
 1. WarfarinFixedDosePolicy
@@ -14,6 +19,7 @@ Policies for Warfarin bandit:
 import numpy as np
 import pandas as pd
 from sklearn.linear_model import LinearRegression, LogisticRegression
+import scipy.optimize
 from data_proc import *
 
 
@@ -74,15 +80,14 @@ class WarfarinLinearOraclePolicy(Policy):
     No online policy based on linear regression can beat the performance of this policy
     """
 
-    def __init__(self, data_file, label_discretizer):
+    def __init__(self, data_file, label_discretizer, standardize=True):
         """
         data_file: path to raw Warfarin dataset file
         label_discretizer: function that maps continuous daily dosage to 0 ~ K-1
         """
         # Prepare training data
         data = pd.read_csv(data_file)
-        data = preprocess(data, label_discretizer)
-        data['bias'] = 1.0  # manually add a bias term
+        data = preprocess(data, label_discretizer, standardize, add_bias=True)
 
         self.num_arms = data['dosage-level'].nunique()  # number of dosage levels (i.e. arms/classes)
         X = data.drop(['daily-dosage', 'dosage-level'], axis=1).values
@@ -112,15 +117,14 @@ class WarfarinLogisticOraclePolicy(Policy):
     This policy only works when the bandit rewards are binary
     """
 
-    def __init__(self, data_file, label_discretizer):
+    def __init__(self, data_file, label_discretizer, standardize=True):
         """
         data_file: path to raw Warfarin dataset file
         label_discretizer: function that maps continuous daily dosage to 0 ~ K-1
         """
         # Prepare training data
         data = pd.read_csv(data_file)
-        data = preprocess(data, label_discretizer)
-        data['bias'] = 1.0  # manually add a bias term
+        data = preprocess(data, label_discretizer, standardize, add_bias=True)
 
         K = data['dosage-level'].nunique()  # number of dosage levels (i.e. arms/classes)
         X = data.drop(['daily-dosage', 'dosage-level'], axis=1).values
@@ -131,12 +135,15 @@ class WarfarinLogisticOraclePolicy(Policy):
         for i in range(K):
             self.models[i].fit(X, y[i])
 
+        # model coefficients
+        self.beta = [model.coef_.squeeze() for model in self.models]
+
     def reset(self):
         # Reset has no effect since the internal models are trained using all data
         pass
 
     def choose_arm(self, context, eval=False):
-        scores = [m.predict_proba(context.reshape((1, -1)))[0,1] for m in self.models]
+        scores = [np.dot(b, context.squeeze()) for b in self.beta]
         return np.argmax(scores)
 
     def update_policy(self, context, arm, reward):
@@ -156,7 +163,7 @@ class LinUCBPolicy(Policy):
     There is a single tuning parameter 'alpha' that controls the exploration tradeoff
     """
 
-    def __init__(self, context_dim, num_arms, alpha=1.0):
+    def __init__(self, context_dim, num_arms, alpha=0.5):
         self.context_dim = context_dim
         self.num_arms = num_arms
         self.alpha = alpha
@@ -341,14 +348,53 @@ class UCB1Policy(Policy):
         return self.num_selected
 
 
+class BernoulliThompsonPolicy(Policy):
+    """
+    Thompson Sampling for non-contextual Bernoulli bandit
+    For contextual bandit, BernoulliThompsonPolicy simply ignores the context
+    """
+
+    def __init__(self, num_arms):
+        self.num_arms = num_arms
+
+    def reset(self):
+        self.step = 0
+        self.num_selected = np.zeros(self.num_arms) # number of times each arm is selected
+
+        # p ~ Beta(alpha, beta)
+        self.alpha = np.ones(self.num_arms)
+        self.beta = np.ones(self.num_arms)
+
+    def choose_arm(self, context, eval=False):
+        if eval:
+            return self.get_optimal_arm()
+        else:
+            scores = [np.random.beta(self.alpha[i], self.beta[i]) for i in range(self.num_arms)]
+            return np.argmax(scores)
+
+    def update_policy(self, context, arm, reward):
+        self.step += 1
+        self.num_selected[arm] += 1
+        if reward == 0:
+            self.alpha[arm] += 1
+        else:
+            self.beta[arm] += 1
+
+    def get_optimal_arm(self):
+        # Based on expected value of Beta distribution
+        return np.argmax(1 / (1 + self.beta / self.alpha))
+
+    def get_action_counts(self):
+        return self.num_selected
+
+
 class LinUCBSafePolicy(Policy):
     """
     Exactly the same as LinUCB, except we don't allow risky exploration:
         - Explore high when greedy action is low, OR
         - Explore low when greedy action is high
-    Q: Is this cheating?
     """
-    def __init__(self, context_dim, num_arms, alpha=1.0):
+    def __init__(self, context_dim, num_arms, alpha=0.5):
         self.context_dim = context_dim
         self.num_arms = num_arms
         self.alpha = alpha
@@ -403,3 +449,140 @@ class LinUCBSafePolicy(Policy):
     def get_num_suboptimal_actions(self):
         # Number of times we select suboptimal actions for exploration
         return self.num_suboptimal_actions
+
+
+class LogisticUCBPolicy(Policy):
+    """
+    Algorithm 1 in paper "Provably Optimal Algorithms for Generalized Linear Contextual Bandits"
+    """
+
+    def __init__(self, context_dim, num_arms, alpha=1.0):
+        self.context_dim = context_dim
+        self.num_arms = num_arms
+        self.alpha = alpha
+        self.reset()
+
+    def reset(self):
+        self.step = 0
+        self.num_selected = np.zeros(self.num_arms) # number of times each arm is selected
+        self.num_suboptimal_actions = 0 # number of times we select suboptimal actions for exploration
+
+        self.X = [None for _ in range(self.num_arms)]
+        self.y = [None for _ in range(self.num_arms)]
+        self.A = [np.eye(self.context_dim) for _ in range(self.num_arms)]
+        self.A_inv = [np.linalg.inv(a) for a in self.A]
+        self.models = [LogisticRegression(C=1.0, fit_intercept=False, solver='liblinear') for _ in range(self.num_arms)]
+        self.beta = [None for _ in range(self.num_arms)]  # model coefficients
+
+    def choose_arm(self, context, eval=False):
+        reward_estimates = np.zeros(self.num_arms)
+        for i in range(self.num_arms):
+            if self.beta[i] is not None:
+                reward_estimates[i] = np.dot(self.beta[i], context.squeeze())
+            else:
+                reward_estimates[i] = 1e6  # make sure we gather observations for every arm
+
+        greedy_arm = np.argmax(reward_estimates)
+        if eval:
+            return greedy_arm  # choose greedily
+        else:
+            bonus = np.zeros(self.num_arms)
+            for i in range(self.num_arms):
+                bonus[i] = self.alpha * np.sqrt(context.T.dot(self.A_inv[i]).dot(context)[0,0])
+
+            select_arm = np.argmax(reward_estimates + bonus)
+            if greedy_arm != select_arm:
+                self.num_suboptimal_actions += 1
+            return select_arm
+
+    def update_policy(self, context, arm, reward):
+        self.step += 1
+        self.num_selected[arm] += 1
+
+        self.X[arm] = context.T.copy() if self.X[arm] is None else np.vstack(( self.X[arm], context.T ))
+        self.y[arm] = np.array([reward]) if self.y[arm] is None else np.concatenate(( self.y[arm], [reward] ))
+        self.A[arm] += np.dot(context, context.T)
+        self.A_inv[arm] = np.linalg.inv(self.A[arm])
+
+        y_sum = np.sum(self.y[arm])
+        if y_sum != 0 and y_sum != -self.num_selected[arm]:
+            self.models[arm].fit(self.X[arm], self.y[arm])
+            self.beta[arm] = self.models[arm].coef_.squeeze()
+
+    def get_action_counts(self):
+        return self.num_selected
+
+    def get_num_suboptimal_actions(self):
+        # Number of times we select suboptimal actions for exploration
+        return self.num_suboptimal_actions
+
+
+class LogisticThompsonPolicy(Policy):
+    """
+        Algorithm 3 in paper "An Empirical Evaluation of Thompson Sampling"
+        The implementation uses scipy to solve optimization problems for posterior update
+
+        The posterior distribution on the weights is approximated by a Gaussian
+        distribution with diagonal covariance matrix
+    """
+
+    def __init__(self, context_dim, num_arms, l=1.0, alpha=0.5):
+        self.context_dim = context_dim
+        self.num_arms = num_arms
+        self.l = l  # initial regularization parameter
+        self.alpha = alpha  # controls exploration vs. exploitation
+        self.reset()
+
+    def reset(self):
+        self.step = 0
+        self.num_selected = np.zeros(self.num_arms) # number of times each arm is selected
+        self.m = np.zeros((self.num_arms, self.context_dim)) # mean of distribution
+        self.q = self.l * np.ones((self.num_arms, self.context_dim))
+
+    def choose_arm(self, context, eval=False):
+        if eval:
+            return np.argmax(np.dot(self.m, context).squeeze())
+        else:
+            scores = np.zeros(self.num_arms)
+            for i in range(self.num_arms):
+                # Sample model parameter from prior distribution
+                w_sample = np.random.normal(loc=self.m[i,:], scale=self.alpha/np.sqrt(self.q[i,:]))
+                # Calculate expected payoff
+                scores[i] = np.sum(w_sample * context.squeeze())
+            return np.argmax(scores)
+
+    def update_policy(self, context, arm, reward):
+        self.step += 1
+        self.num_selected[arm] += 1
+
+        x = context.squeeze()
+        y = 1 if reward == 0 else -1
+
+        # compute new posterior distribution
+        loss_func = self.__make_loss_func(self.q[arm,:], self.m[arm,:], x, y)
+        jac_func = self.__make_jac_func(self.q[arm,:], self.m[arm,:], x, y)
+        ret = scipy.optimize.minimize(loss_func, self.m[arm,:], method="L-BFGS-B", jac=jac_func)
+        if not ret.success:  # optimizer failed
+            print("Optimizer failed with the following message:")
+            print(ret.message)
+
+        w_new = ret.x
+        self.m[arm,:] = w_new
+        p = 1 / (1 + np.exp(-w_new.dot(x)))
+        self.q[arm,:] += (x ** 2) * p * (1 - p)
+
+    def get_action_counts(self):
+        return self.num_selected
+
+    def __make_loss_func(self, q, m, x, y):
+        # Helper method: objective function for posterior update
+        def loss_func(w):
+            return 0.5 * np.sum(q * (w - m) ** 2) + np.log(1 + np.exp(-y * np.sum(w*x)))
+        return loss_func
+
+    def __make_jac_func(self, q, m, x, y):
+        # Helper method: gradient of objevtive function for posterior update
+        def jac_func(w):
+            exp = np.exp(-y * np.sum(w*x))
+            return q * (w - m) - exp / (1 + exp) * y * x
+        return jac_func

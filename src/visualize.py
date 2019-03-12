@@ -5,6 +5,37 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 
+def plot_regret(reward_histories, plot_legend, plot_bound=False, drop_k=0):
+    """
+    Plots regret vs. t
+
+    reward_history:
+        array of reward_history arrays
+    plot_legend:
+        legend for the plotted curve (string)
+    plot_bound:
+        whether to plot the max/min bound
+    drop_k:
+        drop the largest and smallest 'drop_k' records when averaging and plotting
+    """
+    regret = 0 - np.array(reward_histories)
+    N, T = regret.shape  # N simulation runs; T steps per run
+    assert N > 2 * drop_k
+
+    cumulative_regret = np.cumsum(regret, axis=1)
+    cumulative_regret.sort(axis=0)
+    cumulative_regret = cumulative_regret[drop_k:N-drop_k,:]
+
+    average = np.mean(cumulative_regret, axis=0)
+    t_axis = np.arange(1, T+1)
+
+    if plot_bound:
+        lower, upper = cumulative_regret[0,:], cumulative_regret[-1,:]
+        plt.fill_between(t_axis, lower, upper, alpha=0.2, color='gray')
+
+    plt.plot(t_axis, average, label=plot_legend)
+
+
 def plot_incorrect_fraction(reward_histories, plot_legend, plot_bound=False, drop_k=0):
     """
     Plots regret/t vs. t (i.e. fraction of incorrect decisions)

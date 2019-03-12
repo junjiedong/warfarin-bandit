@@ -13,20 +13,22 @@ class WarfarinSimulator():
     continuous dosage labels are transformed to discrete arm labels
     """
 
-    def __init__(self, data_file, label_discretizer, test_size=0, add_bias=True):
+    def __init__(self, data_file, label_discretizer, test_size=0, add_bias=True,
+                       standardize=True, reward_structure="binary"):
         """
         Loads and preprocesses the Warfarin data
         label_discretizer is used to transform continuous dosage to discrete arm labels
 
         If add_bias is True, a constant bias term is added to the feature matrix
+        If standardize is True, feature columns are standardized to have zero mean & unit variance
 
         Also reserves a hold-out validation set of size 'test_size'
+
+        reward_structure: "binary", "k_level", "quantized_diff"
         """
         # Load data
         data = pd.read_csv(data_file)
-        data = preprocess(data, label_discretizer)
-        if add_bias:
-            data['bias'] = 1.0
+        data = preprocess(data, label_discretizer, standardize, add_bias)
 
         self.X_original = data.drop(['daily-dosage', 'dosage-level'], axis=1).values
         self.y_continuous_original = data['daily-dosage'].values  # real-valued label
@@ -40,7 +42,17 @@ class WarfarinSimulator():
         self.val_accuracy_history = None  # accuracies on validation set
         self.confusion_matrix = None
 
+        assert reward_structure in ("binary", "k_level", "quantized_diff")
+        self.reward_structure = reward_structure
+
+        # Average dosage for patients of each dosage-level
+        # Used for calculating "k-level" or "quantized_diff" rewards
+        self.average_dosage = np.zeros(self.num_arms)
+        for i in range(self.num_arms):
+            self.average_dosage[i] = np.mean(self.y_continuous_original[self.y_discrete_original == i])
+
         print("Instantiated a Warfarin Bandit simulator!")
+        print("Reward structure:", reward_structure)
         print("Number of arms: {}".format(self.num_arms))
         print("Number of features: {}".format(self.num_features))
         print("Size of training set for online learning: {}".format(self.train_size))
@@ -75,6 +87,7 @@ class WarfarinSimulator():
         self.reshuffle(random_seed)
 
         reward_history = []
+        decision_correctness_history = []
         val_step_history = []
         val_accuracy_history = []
         confusion_matrix = np.zeros((self.num_arms, self.num_arms))
@@ -85,21 +98,19 @@ class WarfarinSimulator():
             arm = policy.choose_arm(context)
 
             # Evaluate reward for the action
-            """
-            NOTE: For real-valued reward, calculate 'reward' using self.ytrain_continuous.
-                  If also need to calculate the average dosage level for each arm,
-                  do it in the __init__ method so that the code works for any
-                  dosage label discretizer functions (do not hardcode the values!)
-
-                  For binary reward, regret history can be easily inferred from
-                  'reward_history'. If we want to evaluate regret for real-valued
-                  reward, then record the regret in a 'regret_history' array
-            """
-            reward = int(arm == self.ytrain_discrete[t]) - 1  # binary reward
+            true_arm = self.ytrain_discrete[t]
+            if self.reward_structure == "binary":
+                reward = int(arm == true_arm) - 1
+            elif self.reward_structure == "k-level":
+                reward = -abs(self.average_dosage[arm] - self.average_dosage[true_arm])
+            else:
+                dosage_diff = abs(self.average_dosage[arm] - self.ytrain_continuous[t])
+                reward = -int(dosage_diff)
             reward_history.append(reward)
+            decision_correctness_history.append(int(arm == true_arm))
 
             # Update confusion matrix
-            confusion_matrix[self.ytrain_discrete[t], arm] += 1
+            confusion_matrix[true_arm, arm] += 1
 
             # Update policy based on reward feedback
             policy.update_policy(context, arm, reward)
@@ -114,6 +125,7 @@ class WarfarinSimulator():
                 val_step_history.append(t)
 
         self.reward_history = np.array(reward_history)
+        self.decision_correctness_history = np.array(decision_correctness_history)
         self.confusion_matrix = confusion_matrix
         self.val_step_history = np.array(val_step_history) if self.test_size != 0 else None
         self.val_accuracy_history = np.array(val_accuracy_history) if self.test_size != 0 else None
@@ -127,6 +139,12 @@ class WarfarinSimulator():
 
     def get_reward_history(self):
         return self.reward_history
+
+    def get_decision_correctness_history(self):
+        return self.decision_correctness_history
+
+    def get_number_incorrect_decisions(self):
+        return len(self.decision_correctness_history) - np.sum(self.decision_correctness_history)
 
     def get_total_regret(self):
         # total regret with respect to optimal decisions
